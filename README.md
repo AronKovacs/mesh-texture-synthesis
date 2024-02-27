@@ -1,5 +1,5 @@
 # Surface-aware Mesh Texture Synthesis with Pre-trained 2D CNNs
-[Áron Samuel Kovács](https://www.cg.tuwien.ac.at/staff/AronKovacs), [Pedro Hermosilla](https://cvl.tuwien.ac.at/staff/pedro-hermosilla-casajus/), [Renata G. Raidou](https://www.cg.tuwien.ac.at/staff/RenataRaidou)
+[Áron Samuel Kovács](https://www.cg.tuwien.ac.at/staff/AronKovacs), [Pedro Hermosilla](https://phermosilla.github.io/), [Renata G. Raidou](https://www.cg.tuwien.ac.at/staff/RenataRaidou)
 
 ![Teaser image](assets/teaser.png)
 
