@@ -3,7 +3,7 @@
 
 ![Teaser image](assets/teaser.png)
 
-![TU Wien](assets/tuwien.jpg)
+<img src="assets/tuwien.jpg" alt="TU Wien" width="40%">
 
 This repository contains the official implementation of the paper "Surface-aware Mesh Texture Synthesis with Pre-trained 2D CNNs."
 
@@ -31,9 +31,9 @@ There are two main Python scripts: `texture_synthesis.py` and `style_transfer.py
 python texture_synthesis.py <path to .obj> <path to a style image> <texture width> <texture height>
 python style_transfer.py <path to .obj> <path to a content image> <path to a style image>
 ```
-Both scripts will output their texture results to the `generated_textures` folder, in case the `save_progress`
-variable is set to True, they will also output the intermediate results to the `generated_textures/progress folder`.
-Additionally,` texture_synthesis.py` outputs `.obj` meshes with UVs to the `objects_with_uvs` folder.
+Both scripts will output their texture results to the `generated_textures` folder.
+In case the `save_progress` variable is set to `True`, they will also output the intermediate results to the `generated_textures/progress folder`.
+Additionally, `texture_synthesis.py` outputs `.obj` meshes with UVs to the `objects_with_uvs` folder.
 
 ## BibTeX
 ```
