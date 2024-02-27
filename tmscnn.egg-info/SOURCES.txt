@@ -1,0 +1,6 @@
+setup.py
+tmscnn.egg-info/PKG-INFO
+tmscnn.egg-info/SOURCES.txt
+tmscnn.egg-info/dependency_links.txt
+tmscnn.egg-info/not-zip-safe
+tmscnn.egg-info/top_level.txt

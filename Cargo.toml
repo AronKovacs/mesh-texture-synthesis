@@ -1,0 +1,36 @@
+[package]
+name = "tmscnn"
+version = "0.1.0"
+description = "surface aware cnn"
+edition = "2021"
+
+[dependencies]
+cgmath = { version = "0.18.0", features = ["serde"] }
+ndarray = { version = "0.15.4", features = ["rayon"] }
+numpy = "0.14.1"
+num-traits = "0.2"
+ordered-float = "3.6.0"
+pyo3 = { version = "0.14.4", features = ["extension-module"] }
+rayon = "1.5.1"
+
+tobj = "4.0.0"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "1.13.0"
+
+serde_json = "1.0.81"
+
+[lib]
+name = "tmscnn"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.maturin]
+classifier=[
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+]
