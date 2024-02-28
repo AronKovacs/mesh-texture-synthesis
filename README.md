@@ -3,7 +3,7 @@
 
 ![Teaser image](assets/teaser.png)
 
-<img src="assets/tuwien.jpg" alt="TU Wien" width="40%">
+<img src="assets/tuwien.jpg" alt="TU Wien" width="25%">
 
 This repository contains the official implementation of the paper "Surface-aware Mesh Texture Synthesis with Pre-trained 2D CNNs."
 
