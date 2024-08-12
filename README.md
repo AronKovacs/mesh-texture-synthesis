@@ -36,6 +36,26 @@ In case the `save_progress` variable is set to `True`, they will also output the
 Additionally, `texture_synthesis.py` outputs `.obj` meshes with UVs to the `objects_with_uvs` folder.
 
 ## BibTeX
+Paper:
 ```
-TBD
+@inproceedings{kovacs2024meshtexturesynthesis,
+  title={Surface-aware Mesh Texture Synthesis with Pre-trained 2D CNNs},
+  author={Kov{\'a}cs, {\'A}ron Samuel and Hermosilla, Pedro and Raidou, Renata G},
+  booktitle={Computer Graphics Forum},
+  volume={43},
+  number={2},
+  pages={e15016},
+  year={2024},
+  organization={Wiley Online Library}
+}
+```
+
+Code:
+```
+@inproceedings{kovacs2024meshtexturesynthesis_code,
+  title={Surface-aware Mesh Texture Synthesis with Pre-trained 2D CNNs: Code Implementation},
+  author={Kov{\'a}cs, {\'A}ron Samuel and Hermosilla, Pedro and Raidou, Renata G},
+  year={2024},
+  url={\url{https://github.com/AronKovacs/mesh-texture-synthesis/}}
+}
 ```
