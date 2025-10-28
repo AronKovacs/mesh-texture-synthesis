@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 
 use cgmath::prelude::*;
-use cgmath::{dot, Matrix3, Point2, Point3, Vector2, Vector3};
+use cgmath::{dot, Point2, Point3, Vector2, Vector3};
 
 use ndarray::prelude::*;
 use ndarray::{Array, Ix2};
@@ -20,6 +20,10 @@ use pyo3::Python;
 use serde::{Deserialize, Serialize};
 
 use crate::float::Float;
+use crate::line::Line;
+use crate::surface_sampling::{trace_surface_line, trace_surface_line_with_samples};
+use crate::triangle::Triangle;
+use crate::utils::*;
 
 // for visualising textures with an external program
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,93 +47,6 @@ struct Group<F: Float> {
     id: usize,
     position: Point3<F>,
     texels: Vec<Point2<usize>>,
-}
-
-pub struct Line<F: Float> {
-    pub start_point: Point2<F>,
-    pub end_point: Point2<F>,
-}
-
-impl<F: Float> Line<F> {
-    pub fn new(start_point: Point2<F>, end_point: Point2<F>) -> Self {
-        Self {
-            start_point,
-            end_point,
-        }
-    }
-
-    pub fn intersects_with_endpoints(&self, line: &Line<F>) -> bool {
-        let term_a = Line::counter_clockwise(&self.start_point, &line.start_point, &line.end_point);
-        let term_b = Line::counter_clockwise(&self.end_point, &line.start_point, &line.end_point);
-        let term_c = Line::counter_clockwise(&self.start_point, &self.end_point, &line.start_point);
-        let term_d = Line::counter_clockwise(&self.start_point, &self.end_point, &line.end_point);
-        term_a != term_b && term_c != term_d
-    }
-
-    pub fn counter_clockwise(
-        point_a: &Point2<F>,
-        point_b: &Point2<F>,
-        point_c: &Point2<F>,
-    ) -> bool {
-        let term_a = (point_c.y - point_a.y) * (point_b.x - point_a.x);
-        let term_b = (point_b.y - point_a.y) * (point_c.x - point_a.x);
-        term_a > term_b
-    }
-
-    pub fn span(&self) -> Vector2<F> {
-        self.end_point - self.start_point
-    }
-
-    pub fn direction(&self) -> Vector2<F> {
-        self.span().normalize()
-    }
-
-    pub fn sign(&self, other_point: &Point2<F>) -> bool {
-        (other_point.x - self.end_point.x) * (self.start_point.y - self.end_point.y)
-            - (self.start_point.x - self.end_point.x) * (other_point.y - self.end_point.y)
-            > F::zero()
-    }
-
-    pub fn closest_point(&self, point: &Point2<F>) -> Point2<F> {
-        let l2 = (self.start_point - self.end_point).magnitude2();
-        if l2 == F::zero() {
-            return self.start_point;
-        }
-
-        let d1 = point - self.start_point;
-        let d2 = self.end_point - self.start_point;
-
-        let t = (dot(d1, d2) / l2).min(F::zero()).max(F::one());
-
-        self.start_point
-            + Vector2::new(
-                t * (self.end_point.x - self.start_point.x),
-                t * (self.end_point.y - self.start_point.y),
-            )
-    }
-
-    pub fn intersection_with_endpoints(&self, line: &Line<F>) -> Option<Point2<F>> {
-        let p1 = self.start_point;
-        let p2 = self.end_point;
-        let p3 = line.start_point;
-        let p4 = line.end_point;
-        let denom = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y);
-        if denom == F::zero() {
-            return None;
-        }
-        let ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / denom;
-        if ua < F::zero() || ua > F::one() {
-            return None;
-        }
-        let ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / denom;
-        if ub < F::zero() || ub > F::one() {
-            return None;
-        }
-        Some(Point2::new(
-            p1.x + ua * (p2.x - p1.x),
-            p1.y + ua * (p2.y - p1.y),
-        ))
-    }
 }
 
 fn uv_inject_triangle_to_candidate_texture<F: Float>(
@@ -400,208 +317,6 @@ fn compute_normals<F: Float>(
     }
 
     normals
-}
-
-#[derive(Copy, Clone, Debug)]
-struct Triangle<F: Float> {
-    id: usize,
-    world_positions: [Point3<F>; 3],
-    normals: [Vector3<F>; 3],
-    tangents: [Vector3<F>; 3],
-    uvs: [Point2<F>; 3],
-}
-
-impl<F: Float> Triangle<F> {
-    fn from_wps(a: Point3<F>, b: Point3<F>, c: Point3<F>) -> Triangle<F> {
-        let z = F::zero();
-        Triangle {
-            id: std::usize::MAX,
-            world_positions: [a, b, c],
-            normals: [
-                Vector3::new(z, z, z),
-                Vector3::new(z, z, z),
-                Vector3::new(z, z, z),
-            ],
-            tangents: [
-                Vector3::new(z, z, z),
-                Vector3::new(z, z, z),
-                Vector3::new(z, z, z),
-            ],
-            uvs: [Point2::new(z, z), Point2::new(z, z), Point2::new(z, z)],
-        }
-    }
-
-    fn barycentric_is_inside(barycentric: Vector3<F>) -> bool {
-        let eps = F::from(0.00001).unwrap();
-        barycentric[0] >= F::zero() - eps
-            && barycentric[0] <= F::one() + eps
-            && barycentric[1] >= F::zero() - eps
-            && barycentric[1] <= F::one() + eps
-            && barycentric[2] >= F::zero() - eps
-            && barycentric[2] <= F::one() + eps
-            && (barycentric[0] + barycentric[1] + barycentric[2] - F::one()).abs() < eps
-    }
-
-    fn barycentric_snap_inside(barycentric: Vector3<F>) -> Vector3<F> {
-        let mut result = Vector3::new(F::zero(), F::zero(), F::zero());
-        result.x = barycentric.x.max(F::zero());
-        result.y = barycentric.y.max(F::zero());
-
-        if result.x + result.y > F::one() {
-            result.y = (F::one() - result.x).max(F::zero());
-        }
-
-        result.z = (F::one() - result.x - result.y).max(F::zero());
-
-        result
-    }
-
-    fn barycentric_of_uv(&self, uv: Point2<F>) -> Option<Vector3<F>> {
-        let v0 = self.uvs[1] - self.uvs[0];
-        let v1 = self.uvs[2] - self.uvs[0];
-        let v2 = uv - self.uvs[0];
-        let d00 = dot(v0, v0);
-        let d01 = dot(v0, v1);
-        let d11 = dot(v1, v1);
-        let d20 = dot(v2, v0);
-        let d21 = dot(v2, v1);
-        let denom = d00 * d11 - d01 * d01;
-        if denom != F::zero() {
-            let mut result = Vector3::new(F::zero(), F::zero(), F::zero());
-            result[1] = (d11 * d20 - d01 * d21) / denom;
-            result[2] = (d00 * d21 - d01 * d20) / denom;
-            result[0] = F::one() - result[1] - result[2];
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    fn barycentric_of_wp(&self, wp: Point3<F>) -> Option<Vector3<F>> {
-        let v0 = self.world_positions[1] - self.world_positions[0];
-        let v1 = self.world_positions[2] - self.world_positions[0];
-        let v2 = wp - self.world_positions[0];
-        let d00 = dot(v0, v0);
-        let d01 = dot(v0, v1);
-        let d11 = dot(v1, v1);
-        let d20 = dot(v2, v0);
-        let d21 = dot(v2, v1);
-        let denom = d00 * d11 - d01 * d01;
-        if denom != F::zero() {
-            let mut result = Vector3::new(F::zero(), F::zero(), F::zero());
-            result[1] = (d11 * d20 - d01 * d21) / denom;
-            result[2] = (d00 * d21 - d01 * d20) / denom;
-            result[0] = F::one() - result[1] - result[2];
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    fn normal_flat(&self) -> Vector3<F> {
-        let e1 = self.world_positions[1] - self.world_positions[0];
-        let e2 = self.world_positions[2] - self.world_positions[0];
-        e1.cross(e2).normalize()
-    }
-
-    fn world_position(&self, barycentric: Vector3<F>) -> Point3<F> {
-        Point3::from_vec(
-            self.world_positions[0].to_vec() * barycentric[0]
-                + self.world_positions[1].to_vec() * barycentric[1]
-                + self.world_positions[2].to_vec() * barycentric[2],
-        )
-    }
-
-    fn normal(&self, barycentric: Vector3<F>) -> Vector3<F> {
-        let normal = self.normals[0] * barycentric[0]
-            + self.normals[1] * barycentric[1]
-            + self.normals[2] * barycentric[2];
-        normal.normalize()
-    }
-
-    fn tangent(&self, barycentric: Vector3<F>, normal: Vector3<F>) -> Vector3<F> {
-        let interpolated_tangent = self.tangents[0] * barycentric[0]
-            + self.tangents[1] * barycentric[1]
-            + self.tangents[2] * barycentric[2];
-
-        let projected_tangent = project_vector_onto_plane(interpolated_tangent, normal);
-
-        projected_tangent.normalize()
-    }
-
-    fn uv(&self, barycentric: Vector3<F>) -> Point2<F> {
-        Point2::from_vec(
-            self.uvs[0].to_vec() * barycentric[0]
-                + self.uvs[1].to_vec() * barycentric[1]
-                + self.uvs[2].to_vec() * barycentric[2],
-        )
-    }
-
-    fn closest_uv_point(&self, uv: Point2<F>) -> Option<(Point2<F>, F)> {
-        if let Some(barycentric) = self.barycentric_of_uv(uv) {
-            if Self::barycentric_is_inside(barycentric) {
-                return Some((uv, F::zero()));
-            }
-
-            let mut result = Point2::new(F::zero(), F::zero());
-            let mut min_distance2 = F::infinity();
-
-            for vertex_idxs in [[0, 1], [1, 2], [2, 0]].iter() {
-                let a = self.uvs[vertex_idxs[0]];
-                let b = self.uvs[vertex_idxs[1]];
-
-                let line = Line::new(a, b);
-                let closest_point = line.closest_point(&uv);
-                let distance2 = uv.distance2(closest_point);
-                if distance2 < min_distance2 {
-                    result = closest_point;
-                    min_distance2 = distance2;
-                }
-            }
-
-            Some((result, min_distance2.sqrt()))
-        } else {
-            None
-        }
-    }
-}
-
-fn compute_texel_size<F: Float>(triangles: &[Triangle<F>], resolution: Vector2<usize>) -> F {
-    let resolution = resolution.cast().unwrap();
-
-    let mut pixel_sizes: Vec<F> = triangles
-        .iter()
-        .filter_map(|triangle| {
-            let a_uv_v = triangle.uvs[1] - triangle.uvs[0];
-            let b_uv_v = triangle.uvs[2] - triangle.uvs[0];
-            let area_uv = a_uv_v
-                .extend(F::zero())
-                .cross(b_uv_v.extend(F::zero()))
-                .magnitude()
-                * resolution.x
-                * resolution.y;
-
-            let a_ws_v = triangle.world_positions[1] - triangle.world_positions[0];
-            let b_ws_v = triangle.world_positions[2] - triangle.world_positions[0];
-            let area_ws = a_ws_v.cross(b_ws_v).magnitude();
-
-            let texel_size = (area_ws / area_uv).sqrt();
-            if texel_size.is_nan() {
-                None
-            } else {
-                Some(texel_size)
-            }
-        })
-        .collect();
-
-    pixel_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    if pixel_sizes.len() % 2 != 0 {
-        pixel_sizes[pixel_sizes.len() / 2]
-    } else {
-        (pixel_sizes[(pixel_sizes.len() - 1) / 2] + pixel_sizes[pixel_sizes.len() / 2])
-            / (F::one() + F::one())
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1282,6 +997,7 @@ impl Tmscnn {
         resolution: &PyTuple,
         n_layers: usize,
     ) -> PyResult<PyObject> {
+        // Convert python objects to rust structs and prepare output python objects
         let vertices_world_positions_readonly = vertices_world_positions.readonly();
         let vertices_world_positions_arr = vertices_world_positions_readonly.as_array();
 
@@ -1413,6 +1129,7 @@ impl Tmscnn {
         let (world_position_texture, triangle_texture) =
             uv_inject_triangle_world_positions(&triangles, resolution);
 
+        // Each group contains a single texel before any pooling happens. After pooling, a single group can contain many texels
         let mut group_texture = Array::<_, Ix2>::from_elem(world_position_texture.raw_dim(), None);
         let mut groups = vec![];
         let mut group_triangles = vec![];
@@ -1428,7 +1145,7 @@ impl Tmscnn {
                 group_triangles.push(triangle_texture[[x, y]].unwrap());
             }
         }
-        
+
         let first_group_map = group_texture.clone();
         let first_groups = groups.clone();
         let mut first_sources = Array1::<i32>::zeros(first_groups.len() * 9 * 4);
@@ -1438,7 +1155,11 @@ impl Tmscnn {
         let mut neighborhoods = vec![];
 
         let merged_vertices = merge_vertices(vertices_world_positions_arr, wp_indices_arr);
-        let triangle_edge_neighborhoods = create_triangle_edge_neighborhoods(vertices_world_positions_arr, wp_indices_arr, &merged_vertices);
+        let triangle_edge_neighborhoods = create_triangle_edge_neighborhoods(
+            vertices_world_positions_arr,
+            wp_indices_arr,
+            &merged_vertices,
+        );
 
         let result = PyDict::new(py);
 
@@ -1450,7 +1171,8 @@ impl Tmscnn {
 
         let group_textures_layers = PyList::empty(py);
 
-        let world_position_texture_py = PyArray3::<f32>::zeros(py, (resolution.x, resolution.y, 3), false);
+        let world_position_texture_py =
+            PyArray3::<f32>::zeros(py, (resolution.x, resolution.y, 3), false);
 
         for x in 0..resolution.x {
             for y in 0..resolution.y {
@@ -1464,13 +1186,18 @@ impl Tmscnn {
             }
         }
 
+        // Now, we can process layers
         for layer in 0..n_layers {
             if layer != 0 {
                 texel_size *= 2.0;
             }
 
             if layer > 0 {
-                neighborhoods.push(create_group_neighborhoods(&groups, first_group_map.view(), &first_neighborhoods));
+                neighborhoods.push(create_group_neighborhoods(
+                    &groups,
+                    first_group_map.view(),
+                    &first_neighborhoods,
+                ));
             }
 
             let conv_terms_nearest_len = groups.len() * 3 * 3;
@@ -1497,10 +1224,7 @@ impl Tmscnn {
                 }
             }
 
-            let mesh_layer = MeshLayer {
-                mesh_id,
-                layer
-            };
+            let mesh_layer = MeshLayer { mesh_id, layer };
 
             let mut successful_samples = Vec::new();
 
@@ -1509,11 +1233,22 @@ impl Tmscnn {
 
                 let target_group = group.id;
 
-                let normal = 
-                    (triangles[triangle.0].world_positions[1] - triangles[triangle.0].world_positions[0])
-                        .cross(triangles[triangle.0].world_positions[2] - triangles[triangle.0].world_positions[0]).normalize();
+                let normal = (triangles[triangle.0].world_positions[1]
+                    - triangles[triangle.0].world_positions[0])
+                    .cross(
+                        triangles[triangle.0].world_positions[2]
+                            - triangles[triangle.0].world_positions[0],
+                    )
+                    .normalize();
 
-                let tangent = project_vector_onto_plane((triangle.1.x * triangles[triangle.0].tangents[0] + triangle.1.y * triangles[triangle.0].tangents[1] + triangle.1.z * triangles[triangle.0].tangents[2]).normalize(), normal).normalize(); //triangles[triangle.0].tangent(test[group.id % 3], normal);
+                let tangent = project_vector_onto_plane(
+                    (triangle.1.x * triangles[triangle.0].tangents[0]
+                        + triangle.1.y * triangles[triangle.0].tangents[1]
+                        + triangle.1.z * triangles[triangle.0].tangents[2])
+                        .normalize(),
+                    normal,
+                )
+                .normalize(); //triangles[triangle.0].tangent(test[group.id % 3], normal);
                 let bitangent = normal.cross(tangent).normalize();
 
                 for kernel_x in 0..3 {
@@ -1534,7 +1269,16 @@ impl Tmscnn {
                         };
 
                         if layer == 0 {
-                            let (triangle_idx, location_wp, _, success) = trace_surface_line(group.position.map(|n| n as f64), dir.map(|n| n as f64), length as f64, triangle.0 as i32, vertices_world_positions_arr, wp_indices_arr, &merged_vertices, &triangle_edge_neighborhoods);
+                            let (triangle_idx, location_wp, _, success) = trace_surface_line(
+                                group.position.map(|n| n as f64),
+                                dir.map(|n| n as f64),
+                                length as f64,
+                                triangle.0 as i32,
+                                vertices_world_positions_arr,
+                                wp_indices_arr,
+                                &merged_vertices,
+                                &triangle_edge_neighborhoods,
+                            );
 
                             if !success {
                                 continue;
@@ -1543,7 +1287,9 @@ impl Tmscnn {
                             let triangle = &triangles[triangle_idx as usize];
 
                             // transform location_wp to location_uv
-                            let barycentric = if let Some(barycentric) = triangle.barycentric_of_wp(location_wp.map(|n| n as f32)) {
+                            let barycentric = if let Some(barycentric) =
+                                triangle.barycentric_of_wp(location_wp.map(|n| n as f32))
+                            {
                                 barycentric
                             } else {
                                 continue;
@@ -1551,26 +1297,31 @@ impl Tmscnn {
                             let uv = triangle.uv(barycentric);
 
                             // linear interpolation of uv
-                            let (interpolation_coordinates, interpolation_factors) = discretize_uv_bilinear_interpolation_cv(uv, resolution.map(|n| n as f32));
+                            let (interpolation_coordinates, interpolation_factors) =
+                                discretize_uv_bilinear_interpolation_cv(
+                                    uv,
+                                    resolution.map(|n| n as f32),
+                                );
 
                             let mut interpolation_factors_sum = 0.0;
 
                             // store convolution terms
                             for i in 0..4 {
-                                let source_group = match group_texture[[interpolation_coordinates[i].x as usize, interpolation_coordinates[i].y as usize]] {
+                                let source_group = match group_texture[[
+                                    interpolation_coordinates[i].x as usize,
+                                    interpolation_coordinates[i].y as usize,
+                                ]] {
                                     Some(source_group) => source_group,
                                     None => continue,
                                 };
 
                                 local_successful_samples[kernel_x][kernel_y] = true;
-                                
+
                                 interpolation_factors_sum += interpolation_factors[i];
 
                                 // 9 -> weights in kernel
                                 // 4 -> linear interpolation terms
-                                let term_id = target_group * 9 * 4 
-                                    + weight_id * 4
-                                    + i;
+                                let term_id = target_group * 9 * 4 + weight_id * 4 + i;
 
                                 unsafe {
                                     *sources_linear.uget_mut([term_id]) = source_group as i32;
@@ -1580,17 +1331,27 @@ impl Tmscnn {
 
                             if local_successful_samples[kernel_x][kernel_y] {
                                 for i in 0..4 {
-                                    let term_id = target_group * 9 * 4 
-                                        + weight_id * 4
-                                        + i;
+                                    let term_id = target_group * 9 * 4 + weight_id * 4 + i;
                                     unsafe {
-                                        *scaling_factors.uget_mut([term_id]) /= interpolation_factors_sum;
+                                        *scaling_factors.uget_mut([term_id]) /=
+                                            interpolation_factors_sum;
                                     }
                                 }
                             }
                         } else {
                             let mut surface_samples = vec![];
-                            let (_, _, _, success) = trace_surface_line_with_samples(&mut surface_samples, group.position.map(|n| n as f64), dir.map(|n| n as f64), length as f64, length as f64 / 8.0, triangle.0 as i32, vertices_world_positions_arr, wp_indices_arr, &merged_vertices, &triangle_edge_neighborhoods);
+                            let (_, _, _, success) = trace_surface_line_with_samples(
+                                &mut surface_samples,
+                                group.position.map(|n| n as f64),
+                                dir.map(|n| n as f64),
+                                length as f64,
+                                length as f64 / 8.0,
+                                triangle.0 as i32,
+                                vertices_world_positions_arr,
+                                wp_indices_arr,
+                                &merged_vertices,
+                                &triangle_edge_neighborhoods,
+                            );
 
                             if !success {
                                 continue;
@@ -1598,11 +1359,14 @@ impl Tmscnn {
 
                             let mut source_group = None;
 
-                            for (triangle_idx, location_wp) in surface_samples.iter().rev().copied() {
+                            for (triangle_idx, location_wp) in surface_samples.iter().rev().copied()
+                            {
                                 let triangle = &triangles[triangle_idx as usize];
 
                                 // transform location_wp to location_uv
-                                let barycentric = if let Some(barycentric) = triangle.barycentric_of_wp(location_wp.map(|n| n as f32)) {
+                                let barycentric = if let Some(barycentric) =
+                                    triangle.barycentric_of_wp(location_wp.map(|n| n as f32))
+                                {
                                     barycentric
                                 } else {
                                     continue;
@@ -1610,7 +1374,11 @@ impl Tmscnn {
                                 let uv = triangle.uv(barycentric);
 
                                 // linear interpolation of uv
-                                let (interpolation_coordinates, interpolation_factors) = discretize_uv_bilinear_interpolation_cv(uv, resolution.map(|n| n as f32));
+                                let (interpolation_coordinates, interpolation_factors) =
+                                    discretize_uv_bilinear_interpolation_cv(
+                                        uv,
+                                        resolution.map(|n| n as f32),
+                                    );
 
                                 // store convolution terms
                                 //let mut best_neighbor = None;
@@ -1618,18 +1386,32 @@ impl Tmscnn {
                                     if interpolation_factors[i] == 0.0 {
                                         continue;
                                     }
-                                    let candidate_source_group = match group_texture[[interpolation_coordinates[i].x as usize, interpolation_coordinates[i].y as usize]] {
+                                    let candidate_source_group = match group_texture[[
+                                        interpolation_coordinates[i].x as usize,
+                                        interpolation_coordinates[i].y as usize,
+                                    ]] {
                                         Some(candidate_source_group) => candidate_source_group,
                                         None => continue,
                                     };
 
-                                    if neighborhoods[layer].contains(&(target_group.min(candidate_source_group), target_group.max(candidate_source_group))) {
+                                    if neighborhoods[layer].contains(&(
+                                        target_group.min(candidate_source_group),
+                                        target_group.max(candidate_source_group),
+                                    )) {
                                         if source_group.is_none() {
-                                            source_group = Some((candidate_source_group, interpolation_factors[i]));
+                                            source_group = Some((
+                                                candidate_source_group,
+                                                interpolation_factors[i],
+                                            ));
                                         } else {
-                                            let (_, other_interpolation_factor) = source_group.unwrap();
-                                            if interpolation_factors[i] > other_interpolation_factor {
-                                                source_group = Some((candidate_source_group, interpolation_factors[i]));
+                                            let (_, other_interpolation_factor) =
+                                                source_group.unwrap();
+                                            if interpolation_factors[i] > other_interpolation_factor
+                                            {
+                                                source_group = Some((
+                                                    candidate_source_group,
+                                                    interpolation_factors[i],
+                                                ));
                                             }
                                         }
                                     }
@@ -1642,8 +1424,7 @@ impl Tmscnn {
                             if let Some((source_group, _)) = source_group {
                                 local_successful_samples[kernel_x][kernel_y] = true;
 
-                                let term_id = target_group * 9 * 4 
-                                        + weight_id * 4;
+                                let term_id = target_group * 9 * 4 + weight_id * 4;
                                 let scaling_factor = 1.0;
 
                                 unsafe {
@@ -1656,9 +1437,7 @@ impl Tmscnn {
                         if local_successful_samples[kernel_x][kernel_y] {
                             let mut successful_sample = None;
                             for i in 0..4 {
-                                let term_id = target_group * 9 * 4 
-                                    + weight_id * 4
-                                    + i;
+                                let term_id = target_group * 9 * 4 + weight_id * 4 + i;
                                 let source = unsafe { *sources_linear.uget_mut([term_id]) };
                                 if source >= 0 {
                                     successful_sample = Some(source);
@@ -1667,9 +1446,7 @@ impl Tmscnn {
                             }
                             let successful_sample = successful_sample.unwrap();
                             for i in 0..4 {
-                                let term_id = target_group * 9 * 4 
-                                    + weight_id * 4
-                                    + i;
+                                let term_id = target_group * 9 * 4 + weight_id * 4 + i;
                                 let source = unsafe { *sources_linear.uget_mut([term_id]) };
                                 if source < 0 {
                                     unsafe {
@@ -1685,10 +1462,8 @@ impl Tmscnn {
                 // center
                 for i in 0..4 {
                     let weight_id = 4;
-                    let term_id = target_group * 9 * 4 
-                        + weight_id * 4
-                        + i;
-                    
+                    let term_id = target_group * 9 * 4 + weight_id * 4 + i;
+
                     unsafe {
                         *sources_linear.uget_mut([term_id]) = target_group as i32;
                         if i == 0 {
@@ -1697,45 +1472,46 @@ impl Tmscnn {
                             *scaling_factors.uget_mut([term_id]) = 0.0;
                         }
                     }
-            
+
                     local_successful_samples[1][1] = true;
                 }
 
-                successful_samples.extend_from_slice(&[false, false, false, false, false, false, false, false, false]);
+                successful_samples.extend_from_slice(&[
+                    false, false, false, false, false, false, false, false, false,
+                ]);
 
                 for kernel_x in 0..3 {
                     for kernel_y in 0..3 {
                         let weight_id = kernel_x + kernel_y * 3;
 
-                        successful_samples[group.id * 9 + weight_id] = local_successful_samples[kernel_x][kernel_y];
+                        successful_samples[group.id * 9 + weight_id] =
+                            local_successful_samples[kernel_x][kernel_y];
 
                         if local_successful_samples[kernel_x][kernel_y] {
                             continue;
                         }
-            
+
                         let mut replacement_kernel_x = 2 - kernel_x;
                         let mut replacement_kernel_y = 2 - kernel_y;
-            
+
                         if !local_successful_samples[replacement_kernel_x][replacement_kernel_y] {
                             replacement_kernel_x = 1;
                             replacement_kernel_y = 1;
                         }
-            
+
                         let replacement_weight_id = replacement_kernel_x + replacement_kernel_y * 3;
-            
+
                         for i in 0..4 {
-                            let term_id = target_group * 9 * 4 
-                                + weight_id * 4
-                                + i;
-                            
-                            let replacement_term_id = target_group * 9 * 4 
-                                + replacement_weight_id * 4
-                                + i;
-            
+                            let term_id = target_group * 9 * 4 + weight_id * 4 + i;
+
+                            let replacement_term_id =
+                                target_group * 9 * 4 + replacement_weight_id * 4 + i;
+
                             unsafe {
                                 let source_group = *sources_linear.uget([replacement_term_id]);
-                                let interpolation_factor = *scaling_factors.uget([replacement_term_id]);
-                
+                                let interpolation_factor =
+                                    *scaling_factors.uget([replacement_term_id]);
+
                                 *sources_linear.uget_mut([term_id]) = source_group;
                                 *scaling_factors.uget_mut([term_id]) = interpolation_factor;
                             }
@@ -1751,11 +1527,15 @@ impl Tmscnn {
                     first_sources[[i]] = unsafe { *sources_linear.get(i).unwrap() };
                     first_scaling_factors[[i]] = unsafe { *scaling_factors.get(i).unwrap() };
                 }
-                first_neighborhoods = sources_to_neighborhoods(first_sources.view(), first_scaling_factors.view());
+                first_neighborhoods =
+                    sources_to_neighborhoods(first_sources.view(), first_scaling_factors.view());
 
                 neighborhoods.push(HashSet::new());
                 for group_a in 0..first_neighborhoods.len() {
-                    for group_b in first_neighborhoods[group_a].iter().map(|(group_b, _)| *group_b as usize) {
+                    for group_b in first_neighborhoods[group_a]
+                        .iter()
+                        .map(|(group_b, _)| *group_b as usize)
+                    {
                         neighborhoods[0].insert((group_a.min(group_b), group_a.max(group_b)));
                     }
                 }
@@ -1785,7 +1565,12 @@ impl Tmscnn {
             group_textures_layers.append(group_texture_py).unwrap();
 
             if layer < n_layers - 1 {
-                let pools = create_voxel_pools(&groups, texel_size * 2.0, first_group_map.view(), &first_neighborhoods);
+                let pools = create_voxel_pools(
+                    &groups,
+                    texel_size * 2.0,
+                    first_group_map.view(),
+                    &first_neighborhoods,
+                );
 
                 let pooling_spans = PyArray1::<u32>::new(py, pools.len() + 1, false);
                 let pooling_indices = PyArray1::<u32>::new(py, groups.len(), false);
@@ -1830,21 +1615,30 @@ impl Tmscnn {
                         for group in pool.iter().copied() {
                             new_texels.extend(&groups[group as usize].texels);
                             for texel in groups[group as usize].texels.iter() {
-                                pool_first_groups.push(&first_groups[first_group_map[[texel.x, texel.y]].unwrap()]);
+                                pool_first_groups.push(
+                                    &first_groups[first_group_map[[texel.x, texel.y]].unwrap()],
+                                );
                             }
                         }
-                        let eccentricities = compute_eccentricities(&pool_first_groups, &first_neighborhoods);
+                        let eccentricities =
+                            compute_eccentricities(&pool_first_groups, &first_neighborhoods);
                         let mut best_group = None;
                         let mut best_texel = Point2::new(0, 0);
                         let mut best_eccentricity = std::f32::INFINITY;
-                        for (pool_first_group_idx, eccentricity) in eccentricities.iter().copied().enumerate() {
-                            let pool_first_group_texel = pool_first_groups[pool_first_group_idx].texels[0];
+                        for (pool_first_group_idx, eccentricity) in
+                            eccentricities.iter().copied().enumerate()
+                        {
+                            let pool_first_group_texel =
+                                pool_first_groups[pool_first_group_idx].texels[0];
                             if eccentricity < best_eccentricity {
                                 best_group = Some(pool_first_group_idx);
                                 best_texel = pool_first_group_texel;
                                 best_eccentricity = eccentricity;
                             } else if eccentricity == best_eccentricity {
-                                if pool_first_group_texel.x < best_texel.x || (pool_first_group_texel.x == best_texel.x && pool_first_group_texel.y < best_texel.y) {
+                                if pool_first_group_texel.x < best_texel.x
+                                    || (pool_first_group_texel.x == best_texel.x
+                                        && pool_first_group_texel.y < best_texel.y)
+                                {
                                     best_group = Some(pool_first_group_idx);
                                     best_texel = pool_first_group_texel;
                                 }
@@ -1853,7 +1647,11 @@ impl Tmscnn {
                         let best_group = pool_first_groups[best_group.unwrap()];
                         let best_position = best_group.position;
 
-                        let best_texel_idx = new_texels.iter().copied().position(|t| t == best_texel).unwrap();
+                        let best_texel_idx = new_texels
+                            .iter()
+                            .copied()
+                            .position(|t| t == best_texel)
+                            .unwrap();
                         new_texels.swap(0, best_texel_idx);
 
                         let new_group = Group {
@@ -1862,7 +1660,10 @@ impl Tmscnn {
                             texels: new_texels,
                         };
 
-                        (new_group, triangle_texture[[best_texel.x, best_texel.y]].unwrap())
+                        (
+                            new_group,
+                            triangle_texture[[best_texel.x, best_texel.y]].unwrap(),
+                        )
                     })
                     .unzip_into_vecs(&mut new_groups, &mut new_group_triangles);
                 for (new_group_id, pool) in pools.iter().enumerate() {
@@ -1878,12 +1679,24 @@ impl Tmscnn {
             }
         }
 
-        result.set_item("sources_nearest".to_object(py), sources_nearest_layers).unwrap();
-        result.set_item("sources_linear".to_object(py), sources_linear_layers).unwrap();
-        result.set_item("scaling_factors".to_object(py), scaling_factors_layers).unwrap();
-        result.set_item("pooling_spans".to_object(py), pooling_spans_layers).unwrap();
-        result.set_item("pooling_indices".to_object(py), pooling_indices_layers).unwrap();
-        result.set_item("group_textures".to_object(py), group_textures_layers).unwrap();
+        result
+            .set_item("sources_nearest".to_object(py), sources_nearest_layers)
+            .unwrap();
+        result
+            .set_item("sources_linear".to_object(py), sources_linear_layers)
+            .unwrap();
+        result
+            .set_item("scaling_factors".to_object(py), scaling_factors_layers)
+            .unwrap();
+        result
+            .set_item("pooling_spans".to_object(py), pooling_spans_layers)
+            .unwrap();
+        result
+            .set_item("pooling_indices".to_object(py), pooling_indices_layers)
+            .unwrap();
+        result
+            .set_item("group_textures".to_object(py), group_textures_layers)
+            .unwrap();
 
         Ok(result.into())
     }
@@ -1980,605 +1793,6 @@ fn create_triangle_edge_neighborhoods(
     }
 
     triangle_edge_neighborhood
-}
-
-fn trace_surface_line_with_samples(
-    samples: &mut Vec<(i32, Point3<f32>)>,
-    mut pos: Point3<f64>,
-    mut dir: Vector3<f64>,
-    mut length: f64,
-    sample_distance: f64,
-    mut triangle: i32,
-    vertices_world_positions: ArrayView2<f32>,
-    indices: ArrayView2<i32>,
-    merged_vertices: &HashMap<Point3<u32>, Vec<i32>>,
-    triangle_edge_neighborhoods: &[(i32, i8)],
-) -> (i32, Point3<f64>, Vector3<f64>, bool) {
-    samples.clear();
-    samples.push((triangle, pos.map(|n| n as f32)));
-
-    let mut success;
-
-    loop {
-        let segment_length = if length > sample_distance {
-            length -= sample_distance;
-            sample_distance
-        } else {
-            let segment_length = length;
-            length = 0.0;
-            segment_length
-        };
-
-        let (new_triangle, new_pos, new_dir, new_success) = trace_surface_line(
-            pos,
-            dir,
-            segment_length,
-            triangle,
-            vertices_world_positions,
-            indices,
-            merged_vertices,
-            triangle_edge_neighborhoods,
-        );
-
-        success = new_success;
-        if !success {
-            break;
-        }
-
-        samples.push((new_triangle, new_pos.map(|n| n as f32)));
-
-        triangle = new_triangle;
-        pos = new_pos;
-        dir = new_dir;
-
-        if length <= 0.0 {
-            break;
-        }
-    }
-
-    (triangle, pos, dir, success)
-}
-
-fn trace_surface_line(
-    mut pos: Point3<f64>,
-    mut dir: Vector3<f64>,
-    mut length: f64,
-    mut triangle: i32,
-    vertices_world_positions: ArrayView2<f32>,
-    indices: ArrayView2<i32>,
-    merged_vertices: &HashMap<Point3<u32>, Vec<i32>>,
-    triangle_edge_neighborhoods: &[(i32, i8)],
-) -> (i32, Point3<f64>, Vector3<f64>, bool) {
-    let mut successful = true;
-    let eps = 0.0001;
-
-    let loop_counter_max = 100000;
-
-    'primary: for loop_counter in 0..loop_counter_max {
-        if loop_counter == loop_counter_max - 1 {
-            successful = false;
-            break 'primary;
-        }
-
-        if length <= 0.0 {
-            break;
-        }
-
-        dir = dir.normalize();
-
-        // get world positions of the current triangle
-        let vertices_wp: [Point3<f32>; 3] = std::array::from_fn(|i| {
-            Point3::new(
-                vertices_world_positions[[indices[[triangle as usize, i]] as usize, 0]],
-                vertices_world_positions[[indices[[triangle as usize, i]] as usize, 1]],
-                vertices_world_positions[[indices[[triangle as usize, i]] as usize, 2]],
-            )
-        });
-
-        // compute normal of the current triangle
-        let normal_in = (vertices_wp[1] - vertices_wp[0])
-            .cross(vertices_wp[2] - vertices_wp[0])
-            .map(|n| n as f64)
-            .normalize();
-
-        // check if the current pos is directly on a vertex
-        let is_on_vertex = {
-            let mut is_on_vertex = None;
-            let mut min_distance = std::f64::INFINITY;
-            for i in [0, 1, 2] {
-                let distance = pos.distance(vertices_wp[i].map(|n| n as f64));
-                if distance < min_distance && distance < eps {
-                    min_distance = distance;
-                    is_on_vertex = Some(i);
-                }
-            }
-            is_on_vertex
-        };
-
-        // check if the current pos is directly on an edge
-        let is_on_edge = {
-            let mut is_on_edge = None;
-            let mut min_distance = std::f64::INFINITY;
-            for ((edge_start, edge_end), opposite_vertex) in [((0, 1), 2), ((1, 2), 0), ((2, 0), 1)]
-            {
-                let plane_normal = oriented_plane_normal(
-                    vertices_wp[opposite_vertex].map(|n| n as f64),
-                    vertices_wp[edge_start].map(|n| n as f64),
-                    vertices_wp[edge_end].map(|n| n as f64),
-                    normal_in,
-                );
-                let orientation = dir.dot(plane_normal);
-
-                let distance = point_line_distance(
-                    pos,
-                    vertices_wp[edge_start].map(|n| n as f64),
-                    vertices_wp[edge_end].map(|n| n as f64),
-                )
-                .1;
-                if orientation < -eps && distance < min_distance && distance < eps {
-                    min_distance = distance;
-                    is_on_edge = Some(((edge_start, edge_end), opposite_vertex));
-                }
-            }
-            is_on_edge
-        };
-
-        if let Some(vertex) = is_on_vertex {
-            let edges = match vertex {
-                0 => [
-                    (vertices_wp[0], vertices_wp[1]),
-                    (vertices_wp[2], vertices_wp[0]),
-                ],
-                1 => [
-                    (vertices_wp[0], vertices_wp[1]),
-                    (vertices_wp[1], vertices_wp[2]),
-                ],
-                2 => [
-                    (vertices_wp[1], vertices_wp[2]),
-                    (vertices_wp[2], vertices_wp[0]),
-                ],
-                _ => panic!(),
-            };
-            let edge_opposite_vertex = match vertex {
-                0 => [vertices_wp[2], vertices_wp[1]],
-                1 => [vertices_wp[2], vertices_wp[0]],
-                2 => [vertices_wp[0], vertices_wp[1]],
-                _ => panic!(),
-            };
-
-            let plane_normals = [
-                oriented_plane_normal(
-                    edge_opposite_vertex[0].map(|n| n as f64),
-                    edges[0].0.map(|n| n as f64),
-                    edges[0].1.map(|n| n as f64),
-                    normal_in,
-                ),
-                oriented_plane_normal(
-                    edge_opposite_vertex[1].map(|n| n as f64),
-                    edges[1].0.map(|n| n as f64),
-                    edges[1].1.map(|n| n as f64),
-                    normal_in,
-                ),
-            ];
-
-            let orientation = [dir.dot(plane_normals[0]), dir.dot(plane_normals[1])];
-
-            if orientation[0] < -eps || orientation[1] < -eps {
-                let vertex_wp = vertices_wp[vertex];
-
-                for i in merged_vertices[&vertex_wp.map(|n| n.to_bits())]
-                    .iter()
-                    .copied()
-                {
-                    if i == triangle {
-                        continue;
-                    }
-                    let i = i as usize;
-                    let opposite_vertices_wp: [Point3<f32>; 3] = std::array::from_fn(|j| {
-                        Point3::new(
-                            vertices_world_positions[[indices[[i, j]] as usize, 0]],
-                            vertices_world_positions[[indices[[i, j]] as usize, 1]],
-                            vertices_world_positions[[indices[[i, j]] as usize, 2]],
-                        )
-                    });
-                    let mut shared_vertex = None;
-                    for j in 0..3 {
-                        if vertex_wp == opposite_vertices_wp[j] {
-                            shared_vertex = Some(j);
-                            break;
-                        }
-                    }
-
-                    let shared_vertex = match shared_vertex {
-                        Some(shared_vertex) => shared_vertex,
-                        None => continue,
-                    };
-
-                    let normal_out = (opposite_vertices_wp[1] - opposite_vertices_wp[0])
-                        .cross(opposite_vertices_wp[2] - opposite_vertices_wp[0])
-                        .map(|n| n as f64)
-                        .normalize();
-
-                    let opposite_edges = match shared_vertex {
-                        0 => [
-                            (opposite_vertices_wp[0], opposite_vertices_wp[1]),
-                            (opposite_vertices_wp[2], opposite_vertices_wp[0]),
-                        ],
-                        1 => [
-                            (opposite_vertices_wp[0], opposite_vertices_wp[1]),
-                            (opposite_vertices_wp[1], opposite_vertices_wp[2]),
-                        ],
-                        2 => [
-                            (opposite_vertices_wp[1], opposite_vertices_wp[2]),
-                            (opposite_vertices_wp[2], opposite_vertices_wp[0]),
-                        ],
-                        _ => panic!(),
-                    };
-                    let opposite_edge_opposite_vertex = match shared_vertex {
-                        0 => [opposite_vertices_wp[2], opposite_vertices_wp[1]],
-                        1 => [opposite_vertices_wp[2], opposite_vertices_wp[0]],
-                        2 => [opposite_vertices_wp[0], opposite_vertices_wp[1]],
-                        _ => panic!(),
-                    };
-
-                    let opposite_plane_normals = [
-                        oriented_plane_normal(
-                            opposite_edge_opposite_vertex[0].map(|n| n as f64),
-                            opposite_edges[0].0.map(|n| n as f64),
-                            opposite_edges[0].1.map(|n| n as f64),
-                            normal_out,
-                        ),
-                        oriented_plane_normal(
-                            opposite_edge_opposite_vertex[1].map(|n| n as f64),
-                            opposite_edges[1].0.map(|n| n as f64),
-                            opposite_edges[1].1.map(|n| n as f64),
-                            normal_out,
-                        ),
-                    ];
-
-                    let rot = rotation_from_two_vectors(normal_in, normal_out);
-                    let opposite_dir = rot * dir;
-
-                    let opposite_orientation = [
-                        opposite_dir.dot(opposite_plane_normals[0]),
-                        opposite_dir.dot(opposite_plane_normals[1]),
-                    ];
-
-                    if opposite_orientation[0] >= 0.0 && opposite_orientation[1] >= 0.0 {
-                        let new_pos = vertex_wp.map(|n| n as f64);
-                        length -= if new_pos == pos {
-                            0.0
-                        } else {
-                            pos.distance(new_pos)
-                        };
-                        pos = new_pos;
-                        dir = opposite_dir;
-                        triangle = i as i32;
-                        continue 'primary;
-                    }
-                }
-
-                // this is only reachable if we could not find any opposite triangle
-                length = 0.0;
-                successful = false;
-                break 'primary;
-            }
-        }
-        if let Some(((edge_start, edge_end), opposite_vertex)) = is_on_edge {
-            let plane_normal = oriented_plane_normal(
-                vertices_wp[opposite_vertex].map(|n| n as f64),
-                vertices_wp[edge_start].map(|n| n as f64),
-                vertices_wp[edge_end].map(|n| n as f64),
-                normal_in,
-            );
-
-            let orientation = dir.dot(plane_normal);
-            if orientation < -eps {
-                // edge_start is edge index
-                let next_triangle = triangle_edge_neighborhoods[triangle as usize * 3 + edge_start];
-                if next_triangle.0 >= 0 {
-                    let next_vertices_wp: [Point3<f32>; 3] = std::array::from_fn(|i| {
-                        Point3::new(
-                            vertices_world_positions
-                                [[indices[[next_triangle.0 as usize, i]] as usize, 0]],
-                            vertices_world_positions
-                                [[indices[[next_triangle.0 as usize, i]] as usize, 1]],
-                            vertices_world_positions
-                                [[indices[[next_triangle.0 as usize, i]] as usize, 2]],
-                        )
-                    });
-                    let normal_out = (next_vertices_wp[1] - next_vertices_wp[0])
-                        .cross(next_vertices_wp[2] - next_vertices_wp[0])
-                        .map(|n| n as f64)
-                        .normalize();
-
-                    let rot = rotation_from_two_vectors(normal_in, normal_out);
-                    dir = rot * dir;
-
-                    let new_pos = point_line_distance(
-                        pos,
-                        vertices_wp[edge_start].map(|n| n as f64),
-                        vertices_wp[edge_end].map(|n| n as f64),
-                    )
-                    .0;
-                    length -= if pos == new_pos {
-                        0.0
-                    } else {
-                        pos.distance(new_pos)
-                    };
-                    pos = new_pos;
-                    triangle = next_triangle.0;
-                    continue 'primary;
-                } else {
-                    length = 0.0;
-                    successful = false;
-                    break 'primary;
-                }
-            }
-        }
-
-        // at this point we know that the dir is facing inward the current triangle or it follows one of the edges
-        // first we detect if we are going alongside an edge
-
-        // if we are on a vertex, we are on two edges
-        let mut dir_on_edge = None;
-        if let Some(vertex) = is_on_vertex {
-            let edges = match vertex {
-                0 => [
-                    (vertices_wp[0], vertices_wp[1]),
-                    (vertices_wp[2], vertices_wp[0]),
-                ],
-                1 => [
-                    (vertices_wp[0], vertices_wp[1]),
-                    (vertices_wp[1], vertices_wp[2]),
-                ],
-                2 => [
-                    (vertices_wp[1], vertices_wp[2]),
-                    (vertices_wp[2], vertices_wp[0]),
-                ],
-                _ => panic!(),
-            };
-
-            let edge_directions = [
-                (edges[0].1 - edges[0].0).normalize(),
-                (edges[1].1 - edges[1].0).normalize(),
-            ];
-
-            let dir_similarities = [
-                dir.dot(edge_directions[0].map(|n| n as f64)).abs(),
-                dir.dot(edge_directions[1].map(|n| n as f64)).abs(),
-            ];
-
-            let max_similarity_idx = if dir_similarities[0] >= dir_similarities[1] {
-                0
-            } else {
-                1
-            };
-
-            if dir_similarities[max_similarity_idx] > 1.0 - eps {
-                dir_on_edge = Some(edges[max_similarity_idx]);
-            }
-        } else if let Some(((edge_start, edge_end), _)) = is_on_edge {
-            let edge_direction = (vertices_wp[edge_end] - vertices_wp[edge_start])
-                .map(|n| n as f64)
-                .normalize();
-            let dir_similarity = dir.dot(edge_direction).abs();
-
-            if dir_similarity > 1.0 - eps {
-                dir_on_edge = Some((vertices_wp[edge_start], vertices_wp[edge_end]));
-            }
-        }
-
-        if let Some((edge_start, edge_end)) = dir_on_edge {
-            let edge_direction = (edge_end - edge_start).map(|n| n as f64).normalize();
-
-            let orientation = edge_direction.dot(dir);
-
-            let target_vertex = if orientation > eps {
-                edge_end.map(|n| n as f64)
-            } else {
-                edge_start.map(|n| n as f64)
-            };
-
-            let distance = pos.distance(target_vertex);
-
-            if length < distance {
-                pos += length * ((target_vertex - pos).normalize());
-                length = 0.0;
-                successful = true;
-                break 'primary;
-            }
-            if length == distance {
-                pos = target_vertex;
-                length = 0.0;
-                successful = true;
-                break 'primary;
-            } else {
-                pos = target_vertex;
-                length -= distance;
-                continue 'primary;
-            }
-        }
-
-        let mut edges = [
-            Some((vertices_wp[0], vertices_wp[1], vertices_wp[2])),
-            Some((vertices_wp[1], vertices_wp[2], vertices_wp[0])),
-            Some((vertices_wp[2], vertices_wp[0], vertices_wp[1])),
-        ];
-
-        if let Some(vertex) = is_on_vertex {
-            match vertex {
-                0 => {
-                    edges[0] = None;
-                    edges[2] = None;
-                }
-                1 => {
-                    edges[0] = None;
-                    edges[1] = None;
-                }
-                2 => {
-                    edges[1] = None;
-                    edges[2] = None;
-                }
-                _ => panic!(),
-            }
-        }
-        if let Some(((edge_start, _), _)) = is_on_edge {
-            edges[edge_start] = None;
-        }
-
-        let mut best_point_in = None;
-        let mut best_distance = std::f64::INFINITY;
-        for (edge_start, edge_end, opposite_vertex) in edges.iter().copied().filter_map(|e| e) {
-            let (a, _, distance) = line_line_distance(
-                pos,
-                pos + dir,
-                edge_start.map(|n| n as f64),
-                edge_end.map(|n| n as f64),
-                true,
-                false,
-                true,
-                true,
-            );
-
-            let plane_normal = oriented_plane_normal(
-                opposite_vertex.map(|n| n as f64),
-                edge_start.map(|n| n as f64),
-                edge_end.map(|n| n as f64),
-                normal_in,
-            );
-            let orientation = dir.dot(plane_normal);
-
-            if a.x.is_finite() && orientation < -eps && distance < best_distance {
-                best_point_in = Some(a);
-                best_distance = distance;
-            }
-        }
-
-        let go_back = if best_point_in.is_some() {
-            let best_point_in = best_point_in.unwrap();
-
-            let distance_to_intersection = pos.distance(best_point_in);
-
-            if distance_to_intersection > 0.0 {
-                if length < distance_to_intersection {
-                    let new_pos = pos + length * ((best_point_in - pos).normalize());
-                    pos = new_pos;
-                    length = 0.0;
-                    successful = true;
-                    break 'primary;
-                } else if length == distance_to_intersection {
-                    pos = best_point_in;
-                    length = 0.0;
-                    successful = true;
-                    break 'primary;
-                }
-
-                pos = best_point_in;
-                length -= distance_to_intersection;
-                continue 'primary;
-            } else {
-                true
-            }
-        } else {
-            true
-        };
-
-        if go_back {
-            let edges = [
-                (vertices_wp[0], vertices_wp[1], vertices_wp[2]),
-                (vertices_wp[1], vertices_wp[2], vertices_wp[0]),
-                (vertices_wp[2], vertices_wp[0], vertices_wp[1]),
-            ];
-
-            let mut best_opposite_point_in = None;
-            let mut best_opposite_distance = std::f64::INFINITY;
-            for (edge_start, edge_end, _) in edges.iter().copied() {
-                let (a, _, distance) = line_line_distance(
-                    pos,
-                    pos - dir,
-                    edge_start.map(|n| n as f64),
-                    edge_end.map(|n| n as f64),
-                    true,
-                    false,
-                    true,
-                    true,
-                );
-                if distance < best_opposite_distance {
-                    best_opposite_point_in = Some(a);
-                    best_opposite_distance = distance;
-                }
-            }
-
-            if best_opposite_point_in.is_none() {
-                let mut best_opposite_distance = std::f64::INFINITY;
-                for (edge_start, edge_end, _) in edges.iter().copied() {
-                    let (a, _, distance) = line_line_distance(
-                        pos,
-                        pos - dir,
-                        edge_start.map(|n| n as f64),
-                        edge_end.map(|n| n as f64),
-                        true,
-                        false,
-                        true,
-                        true,
-                    );
-                    if distance < best_opposite_distance {
-                        best_opposite_point_in = Some(a);
-                        best_opposite_distance = distance;
-                    }
-                }
-            }
-
-            let best_opposite_point_in =
-                if let Some(best_opposite_point_in) = best_opposite_point_in {
-                    best_opposite_point_in
-                } else {
-                    successful = false;
-                    break 'primary;
-                };
-
-            pos = best_opposite_point_in;
-        }
-    }
-
-    (triangle, pos, dir, successful)
-}
-
-fn compute_discontinuity_groups(
-    group_tangent_discontinuity_factors: &[f32],
-    neighborhoods: &[Vec<(i32, f32)>],
-    tangent_discontinuity_threshold: f32,
-    tangent_discontinuity_size: usize,
-) -> Vec<i32> {
-    let mut to_explore = VecDeque::new();
-    let mut discovered = HashSet::new();
-
-    for (group_id, discontinuity_factor) in group_tangent_discontinuity_factors
-        .iter()
-        .copied()
-        .enumerate()
-    {
-        if discontinuity_factor < tangent_discontinuity_threshold {
-            to_explore.push_back((group_id as i32, 0));
-            discovered.insert(group_id as i32);
-        }
-    }
-
-    while let Some((group_id, distance)) = to_explore.pop_front() {
-        if distance > tangent_discontinuity_size {
-            continue;
-        }
-
-        for (neighbor, _) in neighborhoods[group_id as usize].iter().copied() {
-            if !discovered.contains(&neighbor) {
-                to_explore.push_back((neighbor, distance + 1));
-                discovered.insert(neighbor);
-            }
-        }
-    }
-
-    discovered.into_iter().collect()
 }
 
 fn create_voxel_pools(
@@ -2830,271 +2044,4 @@ fn compute_eccentricities(groups: &[&Group<f32>], neighborhoods: &[Vec<(i32, f32
     }
 
     eccentricities
-}
-
-fn point_line_distance(p: Point3<f64>, a0: Point3<f64>, a1: Point3<f64>) -> (Point3<f64>, f64) {
-    if a0 == a1 {
-        return (a0, p.distance(a0));
-    }
-
-    let d = (a1 - a0) / a1.distance(a0);
-    let v = p - a0;
-    let t = v.dot(d);
-    let i = a0 + t * d;
-
-    return (i, i.distance(p));
-}
-
-fn line_line_distance(
-    a0: Point3<f64>,
-    a1: Point3<f64>,
-    b0: Point3<f64>,
-    b1: Point3<f64>,
-    clamp_a0: bool,
-    clamp_a1: bool,
-    clamp_b0: bool,
-    clamp_b1: bool,
-) -> (Point3<f64>, Point3<f64>, f64) {
-    let a = a1 - a0;
-    let b = b1 - b0;
-    let a_magnitude = a.magnitude();
-    let b_magnitude = b.magnitude();
-
-    let a_normalized = a / a_magnitude;
-    let b_normalized = b / b_magnitude;
-
-    let cross = a_normalized.cross(b_normalized);
-    let denom = cross.magnitude2();
-
-    if denom.abs() < 0.00001 {
-        let d0 = a_normalized.dot(b0 - a0);
-
-        if clamp_a0 || clamp_a1 || clamp_b0 || clamp_b1 {
-            let d1 = a_normalized.dot(b1 - a0);
-
-            if d0 <= 0.0 && 0.0 >= d1 {
-                if clamp_a0 && clamp_b1 {
-                    if d0.abs() < d1.abs() {
-                        return (a0, b1, (a0 - b0).magnitude());
-                    }
-                    return (a0, b1, (a0 - b1).magnitude());
-                }
-            } else if d0 >= a_magnitude && a_magnitude <= d1 {
-                if clamp_a1 || clamp_b0 {
-                    if d0.abs() < d1.abs() {
-                        return (a1, b0, (a1 - b0).magnitude());
-                    }
-                    return (a1, b1, (a1 - b1).magnitude());
-                }
-            }
-        }
-
-        return (
-            Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
-            Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
-            (((d0 * a_normalized) + a0.to_vec()) - b0.to_vec()).magnitude(),
-        );
-    }
-
-    let t = b0 - a0;
-    let det_a = Matrix3::from_cols(t, b_normalized, cross).determinant();
-    let det_b = Matrix3::from_cols(t, a_normalized, cross).determinant();
-
-    let t0 = det_a / denom;
-    let t1 = det_b / denom;
-
-    let mut ap = a0 + (a_normalized * t0);
-    let mut bp = b0 + (b_normalized * t1);
-
-    if clamp_a0 || clamp_a1 || clamp_b0 || clamp_b1 {
-        if clamp_a0 && t0 < 0.0 {
-            ap = a0;
-        } else if clamp_a1 && t0 > a_magnitude {
-            ap = a1;
-        }
-
-        if clamp_b0 && t1 < 0.0 {
-            bp = b0;
-        } else if clamp_b1 && t1 > b_magnitude {
-            bp = b1;
-        }
-
-        if (clamp_a0 && t0 < 0.0) || (clamp_a1 && t0 > a_magnitude) {
-            let mut dot = b_normalized.dot(ap - b0);
-            if clamp_b0 && dot < 0.0 {
-                dot = 0.0;
-            } else if clamp_b1 && dot > b_magnitude {
-                dot = b_magnitude;
-            }
-            bp = b0 + (b_normalized * dot);
-        }
-
-        if (clamp_b0 && t1 < 0.0) || (clamp_b1 && t1 > b_magnitude) {
-            let mut dot = a_normalized.dot(bp - a0);
-            if clamp_a0 && dot < 0.0 {
-                dot = 0.0;
-            } else if clamp_a1 && dot > a_magnitude {
-                dot = a_magnitude;
-            }
-            ap = a0 + (a_normalized * dot);
-        }
-    }
-
-    (ap, bp, (ap - bp).magnitude())
-}
-
-fn oriented_plane_normal(
-    source: Point3<f64>,
-    point_a: Point3<f64>,
-    point_b: Point3<f64>,
-    v: Vector3<f64>,
-) -> Vector3<f64> {
-    let l = point_b - point_a;
-    let m = point_a + l * 0.5;
-    let c = l.cross(v).normalize();
-    let o = source - m;
-    if o.dot(c) >= 0.0 {
-        c
-    } else {
-        -c
-    }
-}
-
-fn project_vector_onto_plane<F: Float>(v: Vector3<F>, n: Vector3<F>) -> Vector3<F> {
-    let d = v.dot(n);
-    let p = n * d;
-    v - p
-}
-
-fn rotation_from_two_vectors(v1: Vector3<f64>, v2: Vector3<f64>) -> Matrix3<f64> {
-    let mut axis = v1.cross(v2);
-    let mut angle_sin = axis.magnitude();
-    let mut angle_cos = v1.dot(v2);
-
-    axis /= angle_sin;
-
-    if angle_sin < 0.0001 {
-        if angle_cos > 0.0 {
-            return Matrix3::one();
-        } else {
-            axis = if v1[0] > v1[1] && v1[0] > v1[2] {
-                Vector3::new(-v1[1] - v1[2], v1[0], v1[0])
-            } else if v1[1] > v1[2] {
-                Vector3::new(v1[1], -v1[0] - v1[2], v1[1])
-            } else {
-                Vector3::new(v1[2], v1[2], -v1[0] - v1[1])
-            };
-
-            axis = axis.normalize();
-            angle_sin = 0.0;
-            angle_cos = -1.0;
-        }
-    }
-
-    let ico = 1.0 - angle_cos;
-    let nsi_0 = axis[0] * angle_sin;
-    let nsi_1 = axis[1] * angle_sin;
-    let nsi_2 = axis[2] * angle_sin;
-
-    let n_00 = (axis[0] * axis[0]) * ico;
-    let n_01 = (axis[0] * axis[1]) * ico;
-    let n_11 = (axis[1] * axis[1]) * ico;
-    let n_02 = (axis[0] * axis[2]) * ico;
-    let n_12 = (axis[1] * axis[2]) * ico;
-    let n_22 = (axis[2] * axis[2]) * ico;
-
-    let mut mat = Matrix3::zero();
-    mat[0][0] = n_00 + angle_cos;
-    mat[0][1] = n_01 + nsi_2;
-    mat[0][2] = n_02 - nsi_1;
-    mat[1][0] = n_01 - nsi_2;
-    mat[1][1] = n_11 + angle_cos;
-    mat[1][2] = n_12 + nsi_0;
-    mat[2][0] = n_02 + nsi_1;
-    mat[2][1] = n_12 - nsi_0;
-    mat[2][2] = n_22 + angle_cos;
-
-    mat
-}
-
-fn discretize_uv_cv(uv: Point2<f32>, resolution: Vector2<f32>) -> (Point2<i32>, Vector2<f32>) {
-    let rv = Vector2::new(uv.x * resolution.x, uv.y * resolution.y);
-    let p = Vector2::new(rv.x.floor(), rv.y.floor());
-    let p_center = p + Vector2::new(0.5, 0.5);
-
-    (Point2::new(p.x as i32, p.y as i32), rv - p_center)
-}
-
-fn discretize_uv_bilinear_interpolation_inner_cv(
-    sample_coordinates: &mut Point2<i32>,
-    sample_factors: &mut Vector2<f32>,
-    coordinate: i32,
-    factor: f32,
-    resolution: f32,
-) {
-    if factor == 1.0 {
-        sample_coordinates.x = coordinate;
-        sample_coordinates.y = coordinate;
-        sample_factors.x = 1.0;
-        sample_factors.y = 0.0;
-    } else if factor >= 0.0 {
-        sample_coordinates.x = coordinate;
-        sample_coordinates.y = (coordinate + 1).min(resolution as i32 - 1);
-        sample_factors.x = 1.0 - factor;
-        sample_factors.y = factor;
-    } else if coordinate == 0 {
-        sample_coordinates.x = coordinate;
-        sample_coordinates.y = coordinate;
-        sample_factors.x = factor.abs();
-        sample_factors.y = 1.0 + factor;
-    } else {
-        sample_coordinates.x = (coordinate - 1).max(0);
-        sample_coordinates.y = coordinate;
-        sample_factors.x = factor.abs();
-        sample_factors.y = 1.0 + factor;
-    }
-}
-
-fn discretize_uv_bilinear_interpolation_cv(
-    uv: Point2<f32>,
-    resolution: Vector2<f32>,
-) -> ([Point2<i32>; 4], [f32; 4]) {
-    let (coordinate, factor) = discretize_uv_cv(uv, resolution);
-
-    let mut xs_coordinates = Point2::new(0, 0);
-    let mut xs_factors = Vector2::new(0.0, 0.0);
-    discretize_uv_bilinear_interpolation_inner_cv(
-        &mut xs_coordinates,
-        &mut xs_factors,
-        coordinate.x,
-        factor.x,
-        resolution.x,
-    );
-
-    let mut ys_coordinates = Point2::new(0, 0);
-    let mut ys_factors = Vector2::new(0.0, 0.0);
-    discretize_uv_bilinear_interpolation_inner_cv(
-        &mut ys_coordinates,
-        &mut ys_factors,
-        coordinate.y,
-        factor.y,
-        resolution.y,
-    );
-
-    let mut coordinates = [Point2::new(0, 0); 4];
-    let mut factors = [0.0; 4];
-
-    coordinates[0] = Point2::new(xs_coordinates.x, ys_coordinates.x);
-    factors[0] = xs_factors.x * ys_factors.x;
-
-    coordinates[1] = Point2::new(xs_coordinates.x, ys_coordinates.y);
-    factors[1] = xs_factors.x * ys_factors.y;
-
-    coordinates[2] = Point2::new(xs_coordinates.y, ys_coordinates.x);
-    factors[2] = xs_factors.y * ys_factors.x;
-
-    coordinates[3] = Point2::new(xs_coordinates.y, ys_coordinates.y);
-    factors[3] = xs_factors.y * ys_factors.y;
-
-    (coordinates, factors)
 }
